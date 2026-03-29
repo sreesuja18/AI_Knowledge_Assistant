@@ -8,7 +8,9 @@ from deep_translator import GoogleTranslator
 from docx import Document as DocxDocument
 from docx.shared import Pt, RGBColor
 from io import BytesIO
-import os, time, pickle, re
+import os
+import time
+import pickle
 
 st.set_page_config(page_title="AI Knowledge Assistant", page_icon="🤖", layout="centered")
 
@@ -52,9 +54,14 @@ st.markdown("""
 def load_resources():
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vector_db = FAISS.load_local("vector_db", embeddings, allow_dangerous_deserialization=True)
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-    # Load BM25
+    api_key = None
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        api_key = "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"
+    client = Groq(api_key=api_key)
+
     with open("bm25_chunks.pkl", "rb") as f:
         data = pickle.load(f)
     tokenized = [text.lower().split() for text in data["texts"]]
@@ -86,63 +93,6 @@ def translate_text(text, target_lang):
     except:
         return text
 
-# ── 1. Query Expansion ──
-def expand_query(question):
-    prompt = f"""Rephrase this HR policy question in 2 different ways to improve search results.
-Return only the 2 rephrased questions, one per line, nothing else.
-Question: {question}"""
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100
-        )
-        extras = response.choices[0].message.content.strip().split("\n")
-        extras = [e.strip() for e in extras if e.strip()]
-        return [question] + extras[:2]
-    except:
-        return [question]
-
-# ── 2. Hybrid Search (BM25 + Vector) ──
-def hybrid_search(query, k=5):
-    # Vector search
-    vector_results = vector_db.similarity_search_with_score(query, k=k)
-    vector_docs = {doc.page_content: (doc, score) for doc, score in vector_results}
-
-    # BM25 search
-    tokens = query.lower().split()
-    bm25_scores = bm25.get_scores(tokens)
-    top_bm25_idx = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k]
-
-    # Merge results
-    combined = {}
-    for doc, score in vector_results:
-        combined[doc.page_content] = {"doc": doc, "score": 1 - min(score, 1)}
-
-    for idx in top_bm25_idx:
-        text = chunk_texts[idx]
-        bm25_norm = bm25_scores[idx] / (max(bm25_scores) + 1e-9)
-        if text in combined:
-            combined[text]["score"] = (combined[text]["score"] + bm25_norm) / 2
-        else:
-            doc = Document(page_content=text, metadata=chunk_metas[idx])
-            combined[text] = {"doc": doc, "score": bm25_norm * 0.5}
-
-    ranked = sorted(combined.values(), key=lambda x: x["score"], reverse=True)
-    return [(item["doc"], item["score"]) for item in ranked[:k]]
-
-# ── 3. Reranker ──
-def rerank(query, results, top_n=3):
-    scored = []
-    for doc, score in results:
-        text = doc.page_content.lower()
-        query_words = query.lower().split()
-        keyword_hits = sum(1 for w in query_words if w in text)
-        combined_score = score * 0.7 + (keyword_hits / max(len(query_words), 1)) * 0.3
-        scored.append((doc, combined_score))
-    return sorted(scored, key=lambda x: x[1], reverse=True)[:top_n]
-
-# ── 4. Get LLM answer with conversation memory ──
 def get_llm_answer(question, context, history=[]):
     history_text = ""
     if history:
@@ -168,7 +118,52 @@ Answer:"""
     )
     return response.choices[0].message.content
 
-# ── Export as Word ──
+def expand_query(question):
+    prompt = f"""Rephrase this HR policy question in 2 different ways to improve search results.
+Return only the 2 rephrased questions, one per line, nothing else.
+Question: {question}"""
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100
+        )
+        extras = response.choices[0].message.content.strip().split("\n")
+        extras = [e.strip() for e in extras if e.strip()]
+        return [question] + extras[:2]
+    except:
+        return [question]
+
+def hybrid_search(query, k=5):
+    vector_results = vector_db.similarity_search_with_score(query, k=k)
+    tokens = query.lower().split()
+    bm25_scores = bm25.get_scores(tokens)
+    top_bm25_idx = sorted(range(len(bm25_scores)),
+                          key=lambda i: bm25_scores[i], reverse=True)[:k]
+    combined = {}
+    for doc, score in vector_results:
+        combined[doc.page_content] = {"doc": doc, "score": 1 - min(score, 1)}
+    for idx in top_bm25_idx:
+        text = chunk_texts[idx]
+        bm25_norm = bm25_scores[idx] / (max(bm25_scores) + 1e-9)
+        if text in combined:
+            combined[text]["score"] = (combined[text]["score"] + bm25_norm) / 2
+        else:
+            doc = Document(page_content=text, metadata=chunk_metas[idx])
+            combined[text] = {"doc": doc, "score": bm25_norm * 0.5}
+    ranked = sorted(combined.values(), key=lambda x: x["score"], reverse=True)
+    return [(item["doc"], item["score"]) for item in ranked[:k]]
+
+def rerank(query, results, top_n=3):
+    scored = []
+    for doc, score in results:
+        text = doc.page_content.lower()
+        query_words = query.lower().split()
+        keyword_hits = sum(1 for w in query_words if w in text)
+        combined_score = score * 0.7 + (keyword_hits / max(len(query_words), 1)) * 0.3
+        scored.append((doc, combined_score))
+    return sorted(scored, key=lambda x: x[1], reverse=True)[:top_n]
+
 def generate_chat_docx(messages):
     doc = DocxDocument()
     title = doc.add_heading("AI Knowledge Assistant — Chat History", 0)
@@ -221,7 +216,8 @@ SUGGESTIONS = [
 for key, val in {
     "messages": [], "feedback": {}, "dark_mode": False,
     "selected_question": None, "response_times": [],
-    "total_questions": 0, "conversation_history": []
+    "total_questions": 0, "conversation_history": [],
+    "agent_messages": [], "agent_history": [], "agent_selected": None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
@@ -263,7 +259,7 @@ with st.sidebar:
     target_lang = lang_map[lang_option]
 
     st.markdown("---")
-    st.markdown("**Technical Features Active:**")
+    st.markdown("**Technical Features:**")
     use_hybrid = st.checkbox("Hybrid Search (BM25 + Vector)", value=True)
     use_rerank = st.checkbox("Reranker", value=True)
     use_memory = st.checkbox("Conversation Memory", value=True)
@@ -300,8 +296,7 @@ with st.sidebar:
         )
 
     if st.button("🗑️ Clear Chat History", key="clear_chat_btn"):
-        for k in ["messages", "feedback", "response_times",
-                  "conversation_history"]:
+        for k in ["messages", "feedback", "response_times", "conversation_history"]:
             st.session_state[k] = [] if k != "feedback" else {}
         st.session_state.total_questions = 0
         st.rerun()
@@ -309,13 +304,12 @@ with st.sidebar:
 # ── Title ──
 st.title("🤖 AI-Based Smart Knowledge Assistant")
 
-tab1, tab2, tab3 = st.tabs(["💬 Chat", "⚖️ Compare Companies", "📊 Statistics"])
+tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "⚖️ Compare Companies", "📊 Statistics", "🤖 AI Agent"])
 
 # ════════════════════════════════
 # TAB 1: CHAT
 # ════════════════════════════════
 with tab1:
-
     if len(st.session_state.messages) == 0:
         st.markdown("""
         <div class="welcome-box">
@@ -339,7 +333,6 @@ with tab1:
                     st.session_state.selected_question = q
                     st.rerun()
 
-    # Autocomplete
     st.markdown("**Question suggestions:**")
     typed = st.text_input(
         "Suggestions", key="autocomplete_input",
@@ -353,7 +346,6 @@ with tab1:
                 st.session_state.selected_question = s
                 st.rerun()
 
-    # Previous messages
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
@@ -364,11 +356,9 @@ with tab1:
                 if "techniques" in msg:
                     meta_html += f'<span class="tech-badge">🔬 {msg["techniques"]}</span>'
                 st.markdown(meta_html, unsafe_allow_html=True)
-
                 if "sources" in msg and msg["sources"]:
                     with st.expander("📄 Sources", expanded=False):
                         st.markdown(msg["sources"], unsafe_allow_html=True)
-
                 fb_key = f"fb_{i}"
                 if fb_key not in st.session_state.feedback:
                     c1, c2, c3 = st.columns([1, 1, 8])
@@ -386,7 +376,6 @@ with tab1:
                     else:
                         st.warning("Thanks! We will work on improving this answer.")
 
-    # Handle question
     if st.session_state.selected_question:
         question = st.session_state.selected_question
         st.session_state.selected_question = None
@@ -406,21 +395,19 @@ with tab1:
                 start_time = time.time()
                 techniques = []
 
-                # Query expansion
                 queries = [filtered_q]
                 if use_expansion:
                     queries = expand_query(filtered_q)
                     techniques.append("Query Expansion")
 
-                # Retrieve
                 all_results = {}
                 for q in queries:
                     if use_hybrid:
                         results = hybrid_search(q, k=6)
-                        techniques.append("Hybrid Search")
+                        if "Hybrid Search" not in techniques:
+                            techniques.append("Hybrid Search")
                     else:
                         results = vector_db.similarity_search_with_score(q, k=6)
-
                     for doc, score in results:
                         key = doc.page_content
                         if key not in all_results or score > all_results[key][1]:
@@ -428,7 +415,6 @@ with tab1:
 
                 results = list(all_results.values())
 
-                # Company filter
                 if selected_company != "All Companies":
                     filtered = [
                         (doc, score) for doc, score in results
@@ -438,7 +424,6 @@ with tab1:
                     if filtered:
                         results = filtered
 
-                # Rerank
                 if use_rerank:
                     results = rerank(question, results, top_n=4)
                     techniques.append("Reranker")
@@ -447,7 +432,6 @@ with tab1:
 
                 context = "\n\n".join([doc.page_content for doc, _ in results])
 
-                # Confidence
                 top_score = results[0][1] if results else 0
                 if top_score > 0.7:
                     confidence = '<span class="confidence-high">● High confidence</span>'
@@ -456,7 +440,6 @@ with tab1:
                 else:
                     confidence = '<span class="confidence-low">● Low confidence</span>'
 
-                # Sources
                 seen = []
                 sources_html = ""
                 for doc, score in results:
@@ -473,11 +456,9 @@ with tab1:
                             f'<div class="chunk-preview">"{preview}..."</div><br>'
                         )
 
-                # Answer with memory
                 history = st.session_state.conversation_history if use_memory else []
                 answer = get_llm_answer(question, context, history)
 
-                # Translate
                 if target_lang:
                     answer = translate_text(answer, target_lang)
 
@@ -485,7 +466,6 @@ with tab1:
                 st.session_state.response_times.append(elapsed)
                 st.session_state.total_questions += 1
 
-                # Save to conversation memory
                 if use_memory:
                     st.session_state.conversation_history.append({
                         "question": question,
@@ -501,7 +481,6 @@ with tab1:
             if tech_str:
                 meta += f'<span class="tech-badge">🔬 {tech_str}</span>'
             st.markdown(meta, unsafe_allow_html=True)
-
             with st.expander("📄 Sources", expanded=True):
                 st.markdown(sources_html, unsafe_allow_html=True)
 
@@ -590,3 +569,101 @@ with tab3:
             satisfaction = round((thumbs_up / (thumbs_up + thumbs_down)) * 100)
             st.markdown(f"**User Satisfaction: {satisfaction}%**")
             st.progress(satisfaction / 100)
+
+# ════════════════════════════════
+# TAB 4: AI AGENT
+# ════════════════════════════════
+with tab4:
+    st.markdown("### 🤖 Agentic AI — Smart Multi-Step Reasoning")
+    st.markdown("""
+    The AI Agent is smarter than normal chat. It:
+    - **Breaks complex questions** into sub-questions
+    - **Chooses the right tool** automatically
+    - **Self-corrects** its own answers
+    - **Compares companies** when needed
+    - **Generates full reports** on request
+    """)
+    st.markdown("---")
+
+    st.markdown("**Try these complex questions:**")
+    agent_examples = [
+        "Compare leave policies of TCS and Google and tell me which is better",
+        "Generate a full HR policy report for Amazon",
+        "Which company has the best parental leave policy and why?",
+        "How many total leave days does a TCS employee get per year?",
+        "What should I consider before joining Tesla vs Microsoft?"
+    ]
+    col1, col2 = st.columns(2)
+    for i, q in enumerate(agent_examples):
+        with col1 if i % 2 == 0 else col2:
+            if st.button(q, key=f"agent_ex_{i}", use_container_width=True):
+                st.session_state.agent_selected = q
+                st.rerun()
+
+    st.markdown("---")
+
+    for msg in st.session_state.agent_messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            if msg["role"] == "assistant" and "tools_used" in msg:
+                if msg["tools_used"]:
+                    tools_str = " → ".join(msg["tools_used"])
+                    st.markdown(
+                        f'<span class="tech-badge">🔧 Tools: {tools_str}</span>'
+                        f'<span class="time-badge">⏱ {msg.get("response_time","?")}s</span>'
+                        f'<span class="tech-badge">📋 {msg.get("steps",0)} steps</span>',
+                        unsafe_allow_html=True
+                    )
+
+    if st.session_state.agent_selected:
+        agent_question = st.session_state.agent_selected
+        st.session_state.agent_selected = None
+    else:
+        agent_question = st.chat_input(
+            "Ask the agent a complex question...",
+            key="agent_input"
+        )
+
+    if agent_question:
+        from agent import run_agent
+
+        with st.chat_message("user"):
+            st.write(agent_question)
+        st.session_state.agent_messages.append({
+            "role": "user",
+            "content": agent_question
+        })
+
+        with st.chat_message("assistant"):
+            with st.spinner("Agent is thinking and using tools..."):
+                start = time.time()
+                result = run_agent(
+                    agent_question,
+                    st.session_state.agent_history
+                )
+                elapsed = round(time.time() - start, 1)
+
+            st.write(result["answer"])
+            if result["tools_used"]:
+                tools_str = " → ".join(result["tools_used"])
+                st.markdown(
+                    f'<span class="tech-badge">🔧 Tools: {tools_str}</span>'
+                    f'<span class="time-badge">⏱ {elapsed}s</span>'
+                    f'<span class="tech-badge">📋 {result["steps"]} steps</span>',
+                    unsafe_allow_html=True
+                )
+
+        st.session_state.agent_messages.append({
+            "role": "assistant",
+            "content": result["answer"],
+            "tools_used": result["tools_used"],
+            "steps": result["steps"],
+            "response_time": elapsed
+        })
+
+        st.session_state.agent_history.extend([
+            {"role": "human", "content": agent_question},
+            {"role": "assistant", "content": result["answer"]}
+        ])
+        if len(st.session_state.agent_history) > 10:
+            st.session_state.agent_history = st.session_state.agent_history[-10:]
