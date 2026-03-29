@@ -5,8 +5,8 @@ from groq import Groq
 # Load vector DB
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vector_db = FAISS.load_local("vector_db", embeddings, allow_dangerous_deserialization=True)
-client = Groq(api_key="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")
-
+import os
+client = Groq(api_key=os.environ.get("GROQ_API_KEY", "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"))
 # 20 test questions with expected keywords
 test_cases = [
     {"question": "What is the leave policy in TCS?", "keywords": ["privilege", "18", "sick", "casual"]},
