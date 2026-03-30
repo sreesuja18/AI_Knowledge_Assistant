@@ -571,20 +571,107 @@ with tab3:
             st.progress(satisfaction / 100)
 
 # ════════════════════════════════
+# ════════════════════════════════
 # TAB 4: AI AGENT
 # ════════════════════════════════
 with tab4:
     st.markdown("### 🤖 Agentic AI — Smart Multi-Step Reasoning")
     st.markdown("""
-    The AI Agent is smarter than normal chat. It:
-    - **Breaks complex questions** into sub-questions
-    - **Chooses the right tool** automatically
-    - **Self-corrects** its own answers
-    - **Compares companies** when needed
-    - **Generates full reports** on request
+    The AI Agent thinks step by step and uses multiple tools automatically.
+    You can also upload a new company PDF and the agent will search it too!
     """)
     st.markdown("---")
 
+    # ── Upload PDF inside Agent tab ──
+    st.markdown("#### 📄 Upload a Company PDF (Optional)")
+    st.markdown("Upload any company HR policy PDF — the agent will include it in its search.")
+
+    agent_uploaded_file = st.file_uploader(
+        "Upload PDF for agent to use",
+        type=["pdf"],
+        key="agent_pdf_uploader"
+    )
+
+    if "agent_uploaded_db" not in st.session_state:
+        st.session_state.agent_uploaded_db = None
+    if "agent_uploaded_name" not in st.session_state:
+        st.session_state.agent_uploaded_name = None
+
+    if agent_uploaded_file is not None:
+        if agent_uploaded_file.name != st.session_state.agent_uploaded_name:
+            with st.spinner(f"Processing {agent_uploaded_file.name} for agent..."):
+                try:
+                    from pypdf import PdfReader
+                    from langchain_text_splitters import RecursiveCharacterTextSplitter
+                    from langchain_community.embeddings import HuggingFaceEmbeddings
+                    from langchain_community.vectorstores import FAISS as FAISSUpload
+
+                    pdf_reader = PdfReader(agent_uploaded_file)
+                    text = ""
+                    for page_num, page in enumerate(pdf_reader.pages):
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += f"\n[Page {page_num}]\n{page_text}"
+
+                    if not text.strip():
+                        st.error("Could not extract text from this PDF.")
+                    else:
+                        splitter = RecursiveCharacterTextSplitter(
+                            chunk_size=1000,
+                            chunk_overlap=200
+                        )
+                        chunks = splitter.create_documents(
+                            [text],
+                            metadatas=[{
+                                "source": agent_uploaded_file.name,
+                                "page": 0
+                            }]
+                        )
+                        upload_embeddings = HuggingFaceEmbeddings(
+                            model_name="sentence-transformers/all-MiniLM-L6-v2"
+                        )
+                        agent_db = FAISSUpload.from_documents(chunks, upload_embeddings)
+
+                        st.session_state.agent_uploaded_db = agent_db
+                        st.session_state.agent_uploaded_name = agent_uploaded_file.name
+
+                        # Pass to agent.py
+                        from agent import set_uploaded_db
+                        set_uploaded_db(agent_db, agent_uploaded_file.name)
+
+                        st.success(f"✅ {agent_uploaded_file.name} loaded! Agent can now search this document.")
+
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+    # Show uploaded doc status
+    if st.session_state.agent_uploaded_name:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info(f"📄 Agent has access to: **{st.session_state.agent_uploaded_name}** + all 10 company docs")
+        with col2:
+            if st.button("Remove PDF", key="remove_agent_pdf"):
+                st.session_state.agent_uploaded_db = None
+                st.session_state.agent_uploaded_name = None
+                from agent import set_uploaded_db
+                set_uploaded_db(None, None)
+                st.rerun()
+
+        # Show search mode toggle
+        search_mode = st.radio(
+            "Agent should search:",
+            ["All company docs + uploaded PDF",
+             "Only uploaded PDF",
+             "Only existing 10 companies"],
+            horizontal=True,
+            key="agent_search_mode"
+        )
+    else:
+        search_mode = "Only existing 10 companies"
+
+    st.markdown("---")
+
+    # ── Example questions ──
     st.markdown("**Try these complex questions:**")
     agent_examples = [
         "Compare leave policies of TCS and Google and tell me which is better",
@@ -593,8 +680,17 @@ with tab4:
         "How many total leave days does a TCS employee get per year?",
         "What should I consider before joining Tesla vs Microsoft?"
     ]
+
+    if st.session_state.agent_uploaded_name:
+        agent_examples.insert(0,
+            f"What is the leave policy in the uploaded document?"
+        )
+        agent_examples.insert(1,
+            f"Compare the uploaded document with TCS policies"
+        )
+
     col1, col2 = st.columns(2)
-    for i, q in enumerate(agent_examples):
+    for i, q in enumerate(agent_examples[:6]):
         with col1 if i % 2 == 0 else col2:
             if st.button(q, key=f"agent_ex_{i}", use_container_width=True):
                 st.session_state.agent_selected = q
@@ -602,6 +698,7 @@ with tab4:
 
     st.markdown("---")
 
+    # ── Previous agent messages ──
     for msg in st.session_state.agent_messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
@@ -615,6 +712,7 @@ with tab4:
                         unsafe_allow_html=True
                     )
 
+    # ── Handle question ──
     if st.session_state.agent_selected:
         agent_question = st.session_state.agent_selected
         st.session_state.agent_selected = None
@@ -625,7 +723,18 @@ with tab4:
         )
 
     if agent_question:
-        from agent import run_agent
+        from agent import run_agent, set_uploaded_db
+
+        # Set uploaded DB if available
+        if st.session_state.agent_uploaded_db:
+            set_uploaded_db(
+                st.session_state.agent_uploaded_db,
+                st.session_state.agent_uploaded_name
+            )
+
+        # Determine search mode
+        use_uploaded_only = (search_mode == "Only uploaded PDF")
+        use_existing_only = (search_mode == "Only existing 10 companies")
 
         with st.chat_message("user"):
             st.write(agent_question)
@@ -639,7 +748,8 @@ with tab4:
                 start = time.time()
                 result = run_agent(
                     agent_question,
-                    st.session_state.agent_history
+                    st.session_state.agent_history,
+                    use_uploaded=use_uploaded_only
                 )
                 elapsed = round(time.time() - start, 1)
 
