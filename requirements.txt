@@ -13,9 +13,7 @@ deep-translator
 python-docx
 fpdf
 pypdf
-opencv-python
 pytesseract
-pdf2image
 Pillow
 torch
 torchvision
