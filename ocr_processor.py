@@ -1,19 +1,35 @@
-import cv2
-import numpy as np
-import pytesseract
-from PIL import Image
-from pdf2image import convert_from_bytes
 import io
 import os
 
-# Set tesseract path for Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR'
+# Safe imports — works on both Windows and Streamlit Cloud
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+try:
+    import pytesseract
+    from PIL import Image
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
+try:
+    from pdf2image import convert_from_bytes
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
+
+# Set tesseract path — Windows only
+if OCR_AVAILABLE:
+    import platform
+    if platform.system() == "Windows":
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 def check_pdf_type(pdf_bytes):
-    """
-    Check if PDF is text-based or scanned image.
-    Returns: 'text', 'scanned', or 'mixed'
-    """
+    """Check if PDF is text-based or scanned. Returns: 'text', 'scanned', or 'mixed'"""
     try:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -33,65 +49,64 @@ def check_pdf_type(pdf_bytes):
         if text_pages == 0:
             return 'scanned'
         return 'mixed'
-    except Exception as e:
+    except Exception:
         return 'unknown'
 
 def preprocess_image_for_ocr(image):
-    """
-    Use OpenCV to preprocess image for better OCR accuracy.
-    Steps: grayscale → denoise → threshold → deskew
-    """
-    # Convert PIL to OpenCV format
-    img_array = np.array(image)
-    if len(img_array.shape) == 3:
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = img_array
-
-    # Denoise
-    denoised = cv2.fastNlMeansDenoising(gray, h=10)
-
-    # Adaptive threshold for better text contrast
-    thresh = cv2.adaptiveThreshold(
-        denoised, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-
-    # Deskew — fix tilted scans
-    coords = np.column_stack(np.where(thresh > 0))
-    if len(coords) > 0:
-        angle = cv2.minAreaRect(coords)[-1]
-        if angle < -45:
-            angle = -(90 + angle)
+    """Use OpenCV to preprocess image for better OCR accuracy."""
+    if not CV2_AVAILABLE:
+        return image
+    try:
+        img_array = np.array(image)
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         else:
-            angle = -angle
-        if abs(angle) < 10:  # Only fix small tilts
-            h, w = thresh.shape
-            center = (w // 2, h // 2)
-            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            thresh = cv2.warpAffine(
-                thresh, M, (w, h),
-                flags=cv2.INTER_CUBIC,
-                borderMode=cv2.BORDER_REPLICATE
-            )
+            gray = img_array
 
-    return thresh
+        # Denoise
+        denoised = cv2.fastNlMeansDenoising(gray, h=10)
+
+        # Adaptive threshold
+        thresh = cv2.adaptiveThreshold(
+            denoised, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
+        )
+
+        # Deskew
+        coords = np.column_stack(np.where(thresh > 0))
+        if len(coords) > 0:
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+            if abs(angle) < 10:
+                h, w = thresh.shape
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                thresh = cv2.warpAffine(
+                    thresh, M, (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE
+                )
+        return thresh
+    except Exception:
+        return image
 
 def extract_text_from_scanned_pdf(pdf_bytes):
-    """
-    Extract text from scanned PDF using OpenCV + Tesseract OCR.
-    Returns list of (page_num, text) tuples.
-    """
+    """Extract text from scanned PDF using OpenCV + Tesseract OCR."""
+    if not PDF2IMAGE_AVAILABLE or not OCR_AVAILABLE:
+        return []
     try:
-        # Convert PDF pages to images
         images = convert_from_bytes(pdf_bytes, dpi=300)
         results = []
         for page_num, image in enumerate(images):
-            # Preprocess with OpenCV
-            processed = preprocess_image_for_ocr(image)
-            # Run Tesseract OCR
-            processed_pil = Image.fromarray(processed)
+            if CV2_AVAILABLE:
+                processed = preprocess_image_for_ocr(image)
+                processed_pil = Image.fromarray(processed)
+            else:
+                processed_pil = image
             text = pytesseract.image_to_string(
                 processed_pil,
                 config='--psm 6 --oem 3'
@@ -99,42 +114,35 @@ def extract_text_from_scanned_pdf(pdf_bytes):
             if text.strip():
                 results.append((page_num, text.strip()))
         return results
-    except Exception as e:
+    except Exception:
         return []
 
 def extract_images_from_pdf(pdf_bytes):
-    """
-    Extract images/charts from PDF pages using OpenCV.
-    Returns list of (page_num, image) tuples.
-    """
+    """Extract images/charts from PDF pages using OpenCV."""
+    if not CV2_AVAILABLE or not PDF2IMAGE_AVAILABLE:
+        return []
     try:
         images = convert_from_bytes(pdf_bytes, dpi=150)
         extracted = []
         for page_num, page_image in enumerate(images):
             img_array = np.array(page_image)
             gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-
-            # Detect regions that look like charts/images
-            # using edge detection
             edges = cv2.Canny(gray, 50, 150)
             contours, _ = cv2.findContours(
                 edges, cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE
             )
-
-            # Find large rectangular regions (likely charts/tables)
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area > 10000:  # Large enough to be a chart
+                if area > 10000:
                     x, y, w, h = cv2.boundingRect(contour)
                     aspect_ratio = w / h
-                    if 0.3 < aspect_ratio < 3.5:  # Reasonable shape
+                    if 0.3 < aspect_ratio < 3.5:
                         cropped = page_image.crop((x, y, x+w, y+h))
                         extracted.append((page_num, cropped))
-                        break  # One per page to avoid too many
-
-        return extracted[:5]  # Max 5 images
-    except Exception as e:
+                        break
+        return extracted[:5]
+    except Exception:
         return []
 
 def process_uploaded_pdf(pdf_bytes, filename):
@@ -160,7 +168,6 @@ def process_uploaded_pdf(pdf_bytes, filename):
         result["pdf_type"] = pdf_type
 
         if pdf_type == 'text':
-            # Normal text extraction
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(pdf_bytes))
             full_text = ""
@@ -175,19 +182,21 @@ def process_uploaded_pdf(pdf_bytes, filename):
             result["message"] = f"Text-based PDF — extracted directly ({len(reader.pages)} pages)"
 
         elif pdf_type in ['scanned', 'mixed']:
-            # Use OpenCV + OCR
-            ocr_results = extract_text_from_scanned_pdf(pdf_bytes)
-            full_text = ""
-            for page_num, text in ocr_results:
-                full_text += f"\n[Page {page_num}]\n{text}"
-            result["text"] = full_text
-            result["pages_processed"] = len(ocr_results)
-            result["ocr_used"] = True
-            result["quality_score"] = 75
-            result["message"] = f"Scanned PDF — OCR applied ({len(ocr_results)} pages processed)"
+            if PDF2IMAGE_AVAILABLE and OCR_AVAILABLE:
+                ocr_results = extract_text_from_scanned_pdf(pdf_bytes)
+                full_text = ""
+                for page_num, text in ocr_results:
+                    full_text += f"\n[Page {page_num}]\n{text}"
+                result["text"] = full_text
+                result["pages_processed"] = len(ocr_results)
+                result["ocr_used"] = True
+                result["quality_score"] = 75
+                result["message"] = f"Scanned PDF — OCR applied ({len(ocr_results)} pages)"
+            else:
+                result["message"] = "Scanned PDF detected but OCR libraries not available"
+                result["quality_score"] = 10
 
         else:
-            # Try text first, fall back to OCR
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(pdf_bytes))
             full_text = ""
@@ -200,12 +209,15 @@ def process_uploaded_pdf(pdf_bytes, filename):
                 result["ocr_used"] = False
                 result["message"] = "Extracted using direct text method"
             else:
-                ocr_results = extract_text_from_scanned_pdf(pdf_bytes)
-                for page_num, text in ocr_results:
-                    full_text += f"\n[Page {page_num}]\n{text}"
-                result["text"] = full_text
-                result["ocr_used"] = True
-                result["message"] = "Fell back to OCR extraction"
+                if PDF2IMAGE_AVAILABLE and OCR_AVAILABLE:
+                    ocr_results = extract_text_from_scanned_pdf(pdf_bytes)
+                    for page_num, text in ocr_results:
+                        full_text += f"\n[Page {page_num}]\n{text}"
+                    result["text"] = full_text
+                    result["ocr_used"] = True
+                    result["message"] = "Fell back to OCR extraction"
+                else:
+                    result["message"] = "Could not extract text — OCR not available"
 
         # Step 2: Check for images
         images = extract_images_from_pdf(pdf_bytes)
@@ -222,6 +234,10 @@ def process_uploaded_pdf(pdf_bytes, filename):
                 result["quality_score"] = 60
             else:
                 result["quality_score"] = 30
+
+        # Add CV2 status to message
+        if not CV2_AVAILABLE:
+            result["message"] += " (OpenCV not available — basic mode)"
 
         return result, images
 
