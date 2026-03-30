@@ -49,29 +49,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Load all resources ──
 @st.cache_resource
 def load_resources():
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vector_db = FAISS.load_local("vector_db", embeddings, allow_dangerous_deserialization=True)
-
     api_key = None
     try:
         api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
         api_key = "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"
     client = Groq(api_key=api_key)
-
     with open("bm25_chunks.pkl", "rb") as f:
         data = pickle.load(f)
     tokenized = [text.lower().split() for text in data["texts"]]
     bm25 = BM25Okapi(tokenized)
-
     return vector_db, client, bm25, data["texts"], data["metas"]
 
 vector_db, client, bm25, chunk_texts, chunk_metas = load_resources()
 
-# ── Helpers ──
 def count_docs():
     try:
         return len([f for f in os.listdir("data") if f.endswith(".pdf")])
@@ -99,7 +94,6 @@ def get_llm_answer(question, context, history=[]):
         history_text = "Previous conversation:\n"
         for h in history[-3:]:
             history_text += f"Q: {h['question']}\nA: {h['answer'][:200]}...\n\n"
-
     prompt = f"""You are a company HR policy assistant.
 {history_text}
 Answer using ONLY the context below. If the answer is not in the context,
@@ -111,7 +105,6 @@ Context:
 
 Current Question: {question}
 Answer:"""
-
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}]
@@ -212,17 +205,16 @@ SUGGESTIONS = [
     "What is the provident fund contribution in Cognizant?"
 ]
 
-# ── Session state ──
 for key, val in {
     "messages": [], "feedback": {}, "dark_mode": False,
     "selected_question": None, "response_times": [],
     "total_questions": 0, "conversation_history": [],
-    "agent_messages": [], "agent_history": [], "agent_selected": None
+    "agent_messages": [], "agent_history": [], "agent_selected": None,
+    "agent_uploaded_db": None, "agent_uploaded_name": None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# ── Dark mode ──
 if st.session_state.dark_mode:
     st.markdown("""
     <style>
@@ -231,24 +223,20 @@ if st.session_state.dark_mode:
     </style>
     """, unsafe_allow_html=True)
 
-# ── Sidebar ──
 with st.sidebar:
     st.markdown("### About")
     st.write("AI-powered HR policy assistant for 10 companies.")
     st.markdown("---")
-
     dark = st.toggle("🌙 Dark Mode", value=st.session_state.dark_mode, key="dark_toggle")
     if dark != st.session_state.dark_mode:
         st.session_state.dark_mode = dark
         st.rerun()
-
     st.markdown("---")
     st.markdown("**Filter by Company:**")
     selected_company = st.selectbox(
         "Company", COMPANY_LIST,
         label_visibility="collapsed", key="company_filter"
     )
-
     st.markdown("---")
     st.markdown("**Response Language:**")
     lang_option = st.selectbox(
@@ -257,7 +245,6 @@ with st.sidebar:
     )
     lang_map = {"English": None, "Tamil": "ta", "Hindi": "hi"}
     target_lang = lang_map[lang_option]
-
     st.markdown("---")
     st.markdown("**Technical Features:**")
     use_hybrid = st.checkbox("Hybrid Search (BM25 + Vector)", value=True)
@@ -265,7 +252,6 @@ with st.sidebar:
     use_memory = st.checkbox("Conversation Memory", value=True)
     use_expansion = st.checkbox("Query Expansion", value=False,
                                 help="Slower but improves recall for vague questions")
-
     st.markdown("---")
     st.markdown("**Companies loaded:**")
     st.write("🇮🇳 TCS | Infosys | Wipro | Cognizant")
@@ -274,7 +260,6 @@ with st.sidebar:
     st.markdown("---")
     st.metric("Documents loaded", count_docs())
     st.markdown("---")
-
     if st.session_state.total_questions > 0:
         st.markdown("**Chat Statistics:**")
         c1, c2 = st.columns(2)
@@ -285,7 +270,6 @@ with st.sidebar:
                         len(st.session_state.response_times), 1)
             st.metric("Avg time", f"{avg}s")
         st.markdown("---")
-
     if len(st.session_state.messages) > 0:
         docx_bytes = generate_chat_docx(st.session_state.messages)
         st.download_button(
@@ -294,14 +278,12 @@ with st.sidebar:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key="download_docx"
         )
-
     if st.button("🗑️ Clear Chat History", key="clear_chat_btn"):
         for k in ["messages", "feedback", "response_times", "conversation_history"]:
             st.session_state[k] = [] if k != "feedback" else {}
         st.session_state.total_questions = 0
         st.rerun()
 
-# ── Title ──
 st.title("🤖 AI-Based Smart Knowledge Assistant")
 
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "⚖️ Compare Companies", "📊 Statistics", "🤖 AI Agent"])
@@ -385,7 +367,6 @@ with tab1:
     if question:
         filtered_q = (f"{question} at {selected_company}"
                       if selected_company != "All Companies" else question)
-
         with st.chat_message("user"):
             st.write(question)
         st.session_state.messages.append({"role": "user", "content": question})
@@ -394,12 +375,10 @@ with tab1:
             with st.spinner("Searching and generating answer..."):
                 start_time = time.time()
                 techniques = []
-
                 queries = [filtered_q]
                 if use_expansion:
                     queries = expand_query(filtered_q)
                     techniques.append("Query Expansion")
-
                 all_results = {}
                 for q in queries:
                     if use_hybrid:
@@ -412,9 +391,7 @@ with tab1:
                         key = doc.page_content
                         if key not in all_results or score > all_results[key][1]:
                             all_results[key] = (doc, score)
-
                 results = list(all_results.values())
-
                 if selected_company != "All Companies":
                     filtered = [
                         (doc, score) for doc, score in results
@@ -423,15 +400,12 @@ with tab1:
                     ]
                     if filtered:
                         results = filtered
-
                 if use_rerank:
                     results = rerank(question, results, top_n=4)
                     techniques.append("Reranker")
                 else:
                     results = results[:4]
-
                 context = "\n\n".join([doc.page_content for doc, _ in results])
-
                 top_score = results[0][1] if results else 0
                 if top_score > 0.7:
                     confidence = '<span class="confidence-high">● High confidence</span>'
@@ -439,7 +413,6 @@ with tab1:
                     confidence = '<span class="confidence-med">● Medium confidence</span>'
                 else:
                     confidence = '<span class="confidence-low">● Low confidence</span>'
-
                 seen = []
                 sources_html = ""
                 for doc, score in results:
@@ -455,25 +428,19 @@ with tab1:
                             f' Page {page}<br>'
                             f'<div class="chunk-preview">"{preview}..."</div><br>'
                         )
-
                 history = st.session_state.conversation_history if use_memory else []
                 answer = get_llm_answer(question, context, history)
-
                 if target_lang:
                     answer = translate_text(answer, target_lang)
-
                 elapsed = round(time.time() - start_time, 1)
                 st.session_state.response_times.append(elapsed)
                 st.session_state.total_questions += 1
-
                 if use_memory:
                     st.session_state.conversation_history.append({
-                        "question": question,
-                        "answer": answer
+                        "question": question, "answer": answer
                     })
                     if len(st.session_state.conversation_history) > 5:
                         st.session_state.conversation_history.pop(0)
-
                 tech_str = " + ".join(list(dict.fromkeys(techniques)))
 
             st.write(answer)
@@ -485,12 +452,9 @@ with tab1:
                 st.markdown(sources_html, unsafe_allow_html=True)
 
         st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "confidence": confidence,
-            "response_time": elapsed,
-            "sources": sources_html,
-            "techniques": tech_str
+            "role": "assistant", "content": answer,
+            "confidence": confidence, "response_time": elapsed,
+            "sources": sources_html, "techniques": tech_str
         })
 
 # ════════════════════════════════
@@ -503,13 +467,11 @@ with tab2:
         company_a = st.selectbox("Company A", COMPANY_LIST[1:], key="cmp_a")
     with col2:
         company_b = st.selectbox("Company B", COMPANY_LIST[1:], index=1, key="cmp_b")
-
     compare_topic = st.selectbox("Topic to compare", [
         "Leave policy", "Parental leave", "Work from home policy",
         "Performance review", "Compensation", "Bereavement leave",
         "Sick leave", "Learning and development"
     ], key="cmp_topic")
-
     if st.button("⚖️ Compare Now", key="compare_btn", use_container_width=True):
         if company_a == company_b:
             st.warning("Please select two different companies!")
@@ -521,10 +483,8 @@ with tab2:
                     results = rerank(q, results, top_n=3)
                     context = "\n\n".join([doc.page_content for doc, _ in results])
                     return get_llm_answer(q, context)
-
                 ans_a = get_company_answer(company_a, compare_topic)
                 ans_b = get_company_answer(company_b, compare_topic)
-
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"#### 🏢 {company_a}")
@@ -544,7 +504,6 @@ with tab3:
         times = st.session_state.response_times
         thumbs_up = sum(1 for v in st.session_state.feedback.values() if v == "up")
         thumbs_down = sum(1 for v in st.session_state.feedback.values() if v == "down")
-
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("Total Questions", st.session_state.total_questions)
@@ -552,7 +511,6 @@ with tab3:
             st.metric("Avg Response Time", f"{round(sum(times)/len(times),1)}s")
         with c3:
             st.metric("Fastest Response", f"{round(min(times),1)}s")
-
         c4, c5, c6 = st.columns(3)
         with c4:
             st.metric("Slowest Response", f"{round(max(times),1)}s")
@@ -560,17 +518,14 @@ with tab3:
             st.metric("👍 Positive", thumbs_up)
         with c6:
             st.metric("👎 Negative", thumbs_down)
-
         st.markdown("---")
         st.markdown("**Response Time per Question:**")
         st.line_chart(times)
-
         if thumbs_up + thumbs_down > 0:
             satisfaction = round((thumbs_up / (thumbs_up + thumbs_down)) * 100)
             st.markdown(f"**User Satisfaction: {satisfaction}%**")
             st.progress(satisfaction / 100)
 
-# ════════════════════════════════
 # ════════════════════════════════
 # TAB 4: AI AGENT
 # ════════════════════════════════
@@ -582,7 +537,6 @@ with tab4:
     """)
     st.markdown("---")
 
-    # ── Upload PDF inside Agent tab ──
     st.markdown("#### 📄 Upload a Company PDF (Optional)")
     st.markdown("Upload any company HR policy PDF — the agent will include it in its search.")
 
@@ -592,59 +546,69 @@ with tab4:
         key="agent_pdf_uploader"
     )
 
-    if "agent_uploaded_db" not in st.session_state:
-        st.session_state.agent_uploaded_db = None
-    if "agent_uploaded_name" not in st.session_state:
-        st.session_state.agent_uploaded_name = None
-
     if agent_uploaded_file is not None:
         if agent_uploaded_file.name != st.session_state.agent_uploaded_name:
             with st.spinner(f"Processing {agent_uploaded_file.name} for agent..."):
                 try:
-                    from pypdf import PdfReader
                     from langchain_text_splitters import RecursiveCharacterTextSplitter
                     from langchain_community.embeddings import HuggingFaceEmbeddings
                     from langchain_community.vectorstores import FAISS as FAISSUpload
+                    from ocr_processor import process_uploaded_pdf
 
-                    pdf_reader = PdfReader(agent_uploaded_file)
-                    text = ""
-                    for page_num, page in enumerate(pdf_reader.pages):
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += f"\n[Page {page_num}]\n{page_text}"
+                    pdf_bytes = agent_uploaded_file.read()
+
+                    st.info("🔍 Analysing document type...")
+                    result, extracted_images = process_uploaded_pdf(
+                        pdf_bytes, agent_uploaded_file.name
+                    )
+                    text = result["text"]
+
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        pdf_type_label = {
+                            "text": "📝 Text PDF",
+                            "scanned": "📸 Scanned PDF",
+                            "mixed": "📄 Mixed PDF",
+                            "unknown": "❓ Unknown"
+                        }.get(result["pdf_type"], "📄 PDF")
+                        st.metric("Document Type", pdf_type_label)
+                    with col_b:
+                        ocr_label = "✅ Yes" if result["ocr_used"] else "❌ No"
+                        st.metric("OCR Used", ocr_label)
+                    with col_c:
+                        st.metric("Quality Score", f"{result['quality_score']}%")
+
+                    if result["ocr_used"]:
+                        st.warning(f"🔬 OpenCV preprocessing — {result['message']}")
+                    else:
+                        st.success(f"✅ {result['message']}")
+
+                    if result["images_found"] > 0:
+                        st.info(f"🖼️ Found {result['images_found']} chart/image region(s)")
 
                     if not text.strip():
-                        st.error("Could not extract text from this PDF.")
+                        st.error("Could not extract text from this PDF even with OCR.")
                     else:
                         splitter = RecursiveCharacterTextSplitter(
-                            chunk_size=1000,
-                            chunk_overlap=200
+                            chunk_size=1000, chunk_overlap=200
                         )
                         chunks = splitter.create_documents(
                             [text],
-                            metadatas=[{
-                                "source": agent_uploaded_file.name,
-                                "page": 0
-                            }]
+                            metadatas=[{"source": agent_uploaded_file.name, "page": 0}]
                         )
                         upload_embeddings = HuggingFaceEmbeddings(
                             model_name="sentence-transformers/all-MiniLM-L6-v2"
                         )
                         agent_db = FAISSUpload.from_documents(chunks, upload_embeddings)
-
                         st.session_state.agent_uploaded_db = agent_db
                         st.session_state.agent_uploaded_name = agent_uploaded_file.name
-
-                        # Pass to agent.py
                         from agent import set_uploaded_db
                         set_uploaded_db(agent_db, agent_uploaded_file.name)
-
                         st.success(f"✅ {agent_uploaded_file.name} loaded! Agent can now search this document.")
 
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
 
-    # Show uploaded doc status
     if st.session_state.agent_uploaded_name:
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -656,8 +620,6 @@ with tab4:
                 from agent import set_uploaded_db
                 set_uploaded_db(None, None)
                 st.rerun()
-
-        # Show search mode toggle
         search_mode = st.radio(
             "Agent should search:",
             ["All company docs + uploaded PDF",
@@ -670,8 +632,6 @@ with tab4:
         search_mode = "Only existing 10 companies"
 
     st.markdown("---")
-
-    # ── Example questions ──
     st.markdown("**Try these complex questions:**")
     agent_examples = [
         "Compare leave policies of TCS and Google and tell me which is better",
@@ -680,14 +640,9 @@ with tab4:
         "How many total leave days does a TCS employee get per year?",
         "What should I consider before joining Tesla vs Microsoft?"
     ]
-
     if st.session_state.agent_uploaded_name:
-        agent_examples.insert(0,
-            f"What is the leave policy in the uploaded document?"
-        )
-        agent_examples.insert(1,
-            f"Compare the uploaded document with TCS policies"
-        )
+        agent_examples.insert(0, "What is the leave policy in the uploaded document?")
+        agent_examples.insert(1, "Compare the uploaded document with TCS policies")
 
     col1, col2 = st.columns(2)
     for i, q in enumerate(agent_examples[:6]):
@@ -698,7 +653,6 @@ with tab4:
 
     st.markdown("---")
 
-    # ── Previous agent messages ──
     for msg in st.session_state.agent_messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
@@ -712,7 +666,6 @@ with tab4:
                         unsafe_allow_html=True
                     )
 
-    # ── Handle question ──
     if st.session_state.agent_selected:
         agent_question = st.session_state.agent_selected
         st.session_state.agent_selected = None
@@ -725,22 +678,18 @@ with tab4:
     if agent_question:
         from agent import run_agent, set_uploaded_db
 
-        # Set uploaded DB if available
         if st.session_state.agent_uploaded_db:
             set_uploaded_db(
                 st.session_state.agent_uploaded_db,
                 st.session_state.agent_uploaded_name
             )
 
-        # Determine search mode
         use_uploaded_only = (search_mode == "Only uploaded PDF")
-        use_existing_only = (search_mode == "Only existing 10 companies")
 
         with st.chat_message("user"):
             st.write(agent_question)
         st.session_state.agent_messages.append({
-            "role": "user",
-            "content": agent_question
+            "role": "user", "content": agent_question
         })
 
         with st.chat_message("assistant"):
