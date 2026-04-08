@@ -57,7 +57,7 @@ def load_resources():
     try:
         api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
-        api_key = "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"
+        api_key = "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"
     client = Groq(api_key=api_key)
     with open("bm25_chunks.pkl", "rb") as f:
         data = pickle.load(f)
